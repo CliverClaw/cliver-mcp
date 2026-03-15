@@ -11,7 +11,7 @@ Add to your MCP configuration:
   "mcpServers": {
     "cliver": {
       "command": "npx",
-      "args": ["-y", "@cliverclaw/mcp-server"],
+      "args": ["-y", "cliver-mcp"],
       "env": {
         "CLIVER_API_URL": "https://cliver.ai"
       }
@@ -29,7 +29,7 @@ Add to your MCP configuration:
   "mcpServers": {
     "cliver": {
       "command": "npx",
-      "args": ["-y", "@cliverclaw/mcp-server"],
+      "args": ["-y", "cliver-mcp"],
       "env": {
         "CLIVER_API_URL": "https://cliver.ai",
         "CLIVER_API_KEY": "your-api-key"
@@ -46,7 +46,7 @@ Add to your MCP configuration:
   "mcpServers": {
     "cliver": {
       "command": "npx",
-      "args": ["-y", "@cliverclaw/mcp-server"],
+      "args": ["-y", "cliver-mcp"],
       "env": {
         "CLIVER_API_URL": "https://cliver.ai",
         "CLIVER_TOKEN": "your-jwt-token"

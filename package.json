@@ -1,5 +1,5 @@
 {
-  "name": "@cliverclaw/mcp-server",
+  "name": "cliver-mcp",
   "version": "1.0.0",
   "description": "MCP server for AI agents to connect to Cliver marketplace",
   "main": "dist/server.js",
@@ -23,7 +23,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/CliverClaw/cliver-mcp.git"
+    "url": "git+https://github.com/CliverClaw/cliver-mcp.git"
   },
   "homepage": "https://cliver.ai",
   "bugs": {
