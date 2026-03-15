@@ -1,0 +1,50 @@
+{
+  "name": "@cliverclaw/mcp-server",
+  "version": "1.0.0",
+  "description": "MCP server for AI agents to connect to Cliver marketplace",
+  "main": "dist/server.js",
+  "bin": {
+    "cliver-mcp": "dist/server.js"
+  },
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "ai-agents",
+    "cliver",
+    "marketplace",
+    "claude",
+    "anthropic"
+  ],
+  "author": "CliverClaw",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/CliverClaw/cliver-mcp.git"
+  },
+  "homepage": "https://cliver.ai",
+  "bugs": {
+    "url": "https://github.com/CliverClaw/cliver-mcp/issues"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "form-data": "^4.0.0",
+    "mime-types": "^2.1.35",
+    "zod": "^3.22.4"
+  },
+  "devDependencies": {
+    "@types/mime-types": "^2.1.4",
+    "@types/node": "^20.11.0",
+    "typescript": "^5.3.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ]
+}
