@@ -1175,51 +1175,77 @@ async function handleOnboard(args: unknown): Promise<string> {
   const steps: string[] = [];
   const authMethod = getAuthMethod();
 
-  // Step 1: Check authentication
-  if (authMethod === 'none') {
-    return `Not authenticated yet.
-
-To get started, you need to authenticate with your wallet:
-
-1. Call cliver_get_challenge with your wallet address
-2. Sign the challenge message
-3. Call cliver_auth with your wallet address and signature
-
-Or set CLIVER_API_KEY in your MCP environment config.`;
-  }
-  steps.push('Authenticated');
-
-  // Step 2: Check if already registered as agent
+  // Step 1: Check authentication / open-register if needed
   let agentInfo: { id: string; name: string; skills: string[]; trustScore: number } | null = null;
-  try {
-    agentInfo = await apiRequest('/agents/me', { requireAuth: true }) as typeof agentInfo;
-    steps.push(`Already registered as agent: ${agentInfo!.name}`);
-  } catch {
-    // Not registered yet — register now
-    if (!input.name) {
-      return `You're authenticated but not registered as an agent yet.
 
-Call cliver_onboard again with a "name" parameter to register:
-  cliver_onboard({ name: "YourAgentName", skills: ["skill1", "skill2"], bio: "What I do" })`;
+  if (authMethod === 'none') {
+    // No auth at all — use friction-free open registration
+    if (!input.name) {
+      return `Welcome to Cliver! To get started, call cliver_onboard with your details:
+
+  cliver_onboard({ name: "YourAgentName", skills: ["skill1", "skill2"], bio: "What I do" })
+
+No wallet or API key needed — you'll get one automatically.`;
     }
 
-    const registerResult = await apiRequest('/auth/register-agent', {
+    const openResult = await apiRequest('/auth/open-register', {
       method: 'POST',
       body: {
         name: input.name,
         skills: input.skills || [],
         bio: input.bio,
       },
-      requireAuth: true,
-    }) as { token: string; agent: { id: string; name: string; skills: string[]; trustScore: number }; starterCredits?: number };
+      requireAuth: false,
+    }) as {
+      token: string;
+      apiKey: string;
+      agent: { id: string; name: string; skills: string[]; trustScore: number };
+      starterCredits: number;
+    };
 
-    authToken = registerResult.token;
-    agentInfo = registerResult.agent;
+    authToken = openResult.token;
+    apiKey = openResult.apiKey;
+    agentInfo = openResult.agent;
 
-    const creditsMsg = registerResult.starterCredits
-      ? ` You received $${registerResult.starterCredits} in free Gateway API credits.`
+    const creditsMsg = openResult.starterCredits
+      ? ` You received $${openResult.starterCredits} in free Gateway API credits.`
       : '';
-    steps.push(`Registered as agent: ${agentInfo!.name}${creditsMsg}`);
+    steps.push(`Registered via open registration: ${agentInfo!.name}${creditsMsg}`);
+    steps.push(`API Key generated: ${openResult.apiKey}`);
+    steps.push('IMPORTANT: Save your API key as CLIVER_API_KEY in your MCP config for future sessions.');
+  } else {
+    steps.push('Authenticated');
+
+    // Check if already registered as agent
+    try {
+      agentInfo = await apiRequest('/agents/me', { requireAuth: true }) as typeof agentInfo;
+      steps.push(`Already registered as agent: ${agentInfo!.name}`);
+    } catch {
+      if (!input.name) {
+        return `You're authenticated but not registered as an agent yet.
+
+Call cliver_onboard again with a "name" parameter to register:
+  cliver_onboard({ name: "YourAgentName", skills: ["skill1", "skill2"], bio: "What I do" })`;
+      }
+
+      const registerResult = await apiRequest('/auth/register-agent', {
+        method: 'POST',
+        body: {
+          name: input.name,
+          skills: input.skills || [],
+          bio: input.bio,
+        },
+        requireAuth: true,
+      }) as { token: string; agent: { id: string; name: string; skills: string[]; trustScore: number }; starterCredits?: number };
+
+      authToken = registerResult.token;
+      agentInfo = registerResult.agent;
+
+      const creditsMsg = registerResult.starterCredits
+        ? ` You received $${registerResult.starterCredits} in free Gateway API credits.`
+        : '';
+      steps.push(`Registered as agent: ${agentInfo!.name}${creditsMsg}`);
+    }
   }
 
   // Step 3: Optionally create a service
