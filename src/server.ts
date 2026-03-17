@@ -21,6 +21,11 @@ import {
   GetMyGigsInput,
   GigActionInput,
   SendMessageInput,
+  UploadChatFileInput,
+  // Real-time chat
+  GetNewMessagesInput,
+  SubscribeConversationInput,
+  GetChatStatusInput,
   GetGigInput,
   GetPendingTasksInput,
   ClaimTaskInput,
@@ -44,6 +49,7 @@ import mime from 'mime-types';
 import * as fs from 'fs';
 import * as path from 'path';
 import FormData from 'form-data';
+import { io, Socket } from 'socket.io-client';
 
 // Configuration
 const API_BASE_URL = process.env.CLIVER_API_URL || 'http://localhost:7000';
@@ -83,6 +89,180 @@ if (apiKey) {
   console.error('Cliver MCP: Using JWT token from CLIVER_TOKEN environment variable (legacy)');
 } else {
   console.error('Cliver MCP: No credentials set. Use CLIVER_API_KEY or cliver_auth to authenticate.');
+}
+
+// ===========================================
+// REAL-TIME CHAT CLIENT (WebSocket)
+// ===========================================
+
+interface ChatMessage {
+  id: string;
+  conversationId: string;
+  senderId: string;
+  senderType: 'human' | 'agent';
+  type: string;
+  content?: string;
+  metadata?: Record<string, unknown>;
+  createdAt: string;
+}
+
+class ChatClient {
+  private socket: Socket | null = null;
+  private messageBuffer: ChatMessage[] = [];
+  private subscribedConversations: Set<string> = new Set();
+  private connected = false;
+  private reconnecting = false;
+  private maxBufferSize = 100;
+
+  constructor() {
+    this.connect();
+  }
+
+  private connect(): void {
+    const authMethod = getAuthMethod();
+    if (authMethod === 'none') {
+      console.error('ChatClient: No auth token, cannot connect to WebSocket');
+      return;
+    }
+
+    const auth = authMethod === 'api-key' && apiKey
+      ? { apiKey }
+      : { token: authToken };
+
+    this.socket = io(CHAT_BASE_URL, {
+      auth,
+      transports: ['websocket'],
+      reconnection: true,
+      reconnectionAttempts: 5,
+      reconnectionDelay: 1000,
+    });
+
+    this.socket.on('connect', () => {
+      this.connected = true;
+      this.reconnecting = false;
+      console.error('ChatClient: Connected to chat server');
+
+      // Resubscribe to conversations after reconnect
+      for (const conversationId of this.subscribedConversations) {
+        this.socket?.emit('join', { conversationId });
+      }
+    });
+
+    this.socket.on('disconnect', (reason) => {
+      this.connected = false;
+      console.error(`ChatClient: Disconnected - ${reason}`);
+    });
+
+    this.socket.on('reconnect_attempt', () => {
+      this.reconnecting = true;
+    });
+
+    this.socket.on('error', (error) => {
+      console.error('ChatClient: Socket error:', error);
+    });
+
+    // Listen for incoming messages
+    this.socket.on('message', (message: ChatMessage) => {
+      // Only buffer messages from humans (not our own agent messages)
+      if (message.senderType === 'human') {
+        this.addToBuffer(message);
+        console.error(`ChatClient: Received message from ${message.senderId} in ${message.conversationId}`);
+      }
+    });
+
+    // Listen for typing indicators
+    this.socket.on('typing', (data: { conversationId: string; userId: string }) => {
+      console.error(`ChatClient: User ${data.userId} is typing in ${data.conversationId}`);
+    });
+  }
+
+  private addToBuffer(message: ChatMessage): void {
+    this.messageBuffer.push(message);
+    // Keep buffer size under control
+    if (this.messageBuffer.length > this.maxBufferSize) {
+      this.messageBuffer = this.messageBuffer.slice(-this.maxBufferSize);
+    }
+  }
+
+  public subscribe(conversationId: string): boolean {
+    if (!this.socket || !this.connected) {
+      return false;
+    }
+    this.subscribedConversations.add(conversationId);
+    this.socket.emit('join', { conversationId });
+    console.error(`ChatClient: Subscribed to conversation ${conversationId}`);
+    return true;
+  }
+
+  public unsubscribe(conversationId: string): void {
+    if (this.socket && this.connected) {
+      this.socket.emit('leave', { conversationId });
+    }
+    this.subscribedConversations.delete(conversationId);
+  }
+
+  public getNewMessages(conversationId?: string, limit?: number): ChatMessage[] {
+    let messages = conversationId
+      ? this.messageBuffer.filter((m) => m.conversationId === conversationId)
+      : [...this.messageBuffer];
+
+    // Apply limit
+    if (limit && messages.length > limit) {
+      messages = messages.slice(-limit);
+    }
+
+    // Clear returned messages from buffer
+    const returnedIds = new Set(messages.map((m) => m.id));
+    this.messageBuffer = this.messageBuffer.filter((m) => !returnedIds.has(m.id));
+
+    return messages;
+  }
+
+  public getStatus(): {
+    connected: boolean;
+    reconnecting: boolean;
+    subscribedConversations: string[];
+    bufferedMessages: number;
+  } {
+    return {
+      connected: this.connected,
+      reconnecting: this.reconnecting,
+      subscribedConversations: Array.from(this.subscribedConversations),
+      bufferedMessages: this.messageBuffer.length,
+    };
+  }
+
+  public sendMessage(conversationId: string, content: string, type = 'text'): void {
+    if (this.socket && this.connected) {
+      this.socket.emit('message', { conversationId, content, type });
+    }
+  }
+
+  public sendTyping(conversationId: string): void {
+    if (this.socket && this.connected) {
+      this.socket.emit('typing', { conversationId });
+    }
+  }
+
+  public disconnect(): void {
+    if (this.socket) {
+      this.socket.disconnect();
+      this.socket = null;
+    }
+    this.connected = false;
+    this.messageBuffer = [];
+    this.subscribedConversations.clear();
+  }
+}
+
+// Global chat client instance (lazy initialized)
+let chatClient: ChatClient | null = null;
+
+function getChatClient(): ChatClient {
+  if (!chatClient) {
+    chatClient = new ChatClient();
+  }
+  return chatClient;
 }
 
 /**
@@ -320,12 +500,16 @@ async function handleRegisterAgent(args: unknown): Promise<string> {
     method: 'POST',
     body: input,
     requireAuth: true,
-  }) as { token: string; agent: { id: string; name: string; skills: string[]; trustScore: number } };
+  }) as { token: string; agent: { id: string; name: string; skills: string[]; trustScore: number }; starterCredits?: number };
 
   // Update token with agent info
   authToken = result.token;
 
-  return `Agent registered successfully!\n\nAgent ID: ${result.agent.id}\nName: ${result.agent.name}\nSkills: ${result.agent.skills?.join(', ') || 'None'}\nTrust Score: ${result.agent.trustScore}\n\nYou can now create services and accept gigs.`;
+  const creditsMsg = result.starterCredits
+    ? `\nStarter Credits: $${result.starterCredits} (free Gateway API credits)`
+    : '';
+
+  return `Agent registered successfully!\n\nAgent ID: ${result.agent.id}\nName: ${result.agent.name}\nSkills: ${result.agent.skills?.join(', ') || 'None'}\nTrust Score: ${result.agent.trustScore}${creditsMsg}\n\nYou can now create services and accept gigs.`;
 }
 
 async function handleListServices(args: unknown): Promise<string> {
@@ -431,6 +615,69 @@ async function handleSendMessage(args: unknown): Promise<string> {
   }) as { id: string; content: string; createdAt: string };
 
   return `Message sent!\n\nMessage ID: ${result.id}\nContent: ${result.content}\nSent at: ${result.createdAt}`;
+}
+
+async function handleUploadChatFile(args: unknown): Promise<string> {
+  const input = UploadChatFileInput.parse(args);
+
+  // Check if file exists
+  if (!fs.existsSync(input.filePath)) {
+    throw new Error(`File not found: ${input.filePath}`);
+  }
+
+  // Determine MIME type
+  const mimeType = mime.lookup(input.filePath) || 'application/octet-stream';
+
+  // Create form data
+  const formData = new FormData();
+  formData.append('file', fs.createReadStream(input.filePath));
+
+  // Upload to chat server
+  const response = await fetch(
+    `${CHAT_BASE_URL}/api/chats/${input.conversationId}/upload`,
+    {
+      method: 'POST',
+      headers: {
+        ...getAuthHeaders(),
+        ...formData.getHeaders(),
+      },
+      body: formData as unknown as BodyInit,
+    }
+  );
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ error: 'Upload failed' }));
+    throw new Error((error as { error: string }).error);
+  }
+
+  const result = await response.json() as {
+    message: { id: string; type: string; content: string; createdAt: string };
+    url: string;
+    r2Key?: string;
+  };
+
+  // If there's a caption, send it as a follow-up message
+  if (input.caption) {
+    await apiRequest(`/api/chats/${input.conversationId}/messages`, {
+      method: 'POST',
+      body: { content: input.caption, type: 'text' },
+      requireAuth: true,
+      baseUrl: CHAT_BASE_URL,
+    });
+  }
+
+  const fileType = result.message.type === 'image' ? 'Image' : 'File';
+
+  return `${fileType} uploaded and shared in chat!
+
+Message ID: ${result.message.id}
+Type: ${result.message.type}
+URL: ${result.url}
+${result.r2Key ? `R2 Key: ${result.r2Key}` : ''}
+Sent at: ${result.message.createdAt}
+${input.caption ? `\nCaption: ${input.caption}` : ''}
+
+The ${fileType.toLowerCase()} is now visible in the conversation.`;
 }
 
 async function handleGetGig(args: unknown): Promise<string> {
@@ -852,6 +1099,233 @@ async function handleDeleteFaq(args: unknown): Promise<string> {
   return `FAQ deleted successfully!\n\nFAQ ID: ${input.faqId}`;
 }
 
+// ===========================================
+// REAL-TIME CHAT HANDLERS
+// ===========================================
+
+async function handleGetNewMessages(args: unknown): Promise<string> {
+  const input = GetNewMessagesInput.parse(args);
+  const client = getChatClient();
+  const messages = client.getNewMessages(input.conversationId, input.limit);
+
+  if (messages.length === 0) {
+    return 'No new messages.';
+  }
+
+  const messageList = messages
+    .map((m) => {
+      const time = new Date(m.createdAt).toLocaleTimeString();
+      const contentPreview = m.content
+        ? m.content.length > 100
+          ? m.content.substring(0, 100) + '...'
+          : m.content
+        : `[${m.type}]`;
+      return `[${time}] ${m.senderType === 'human' ? 'User' : 'Agent'}: ${contentPreview}`;
+    })
+    .join('\n');
+
+  return `${messages.length} new message(s):\n\n${messageList}`;
+}
+
+async function handleSubscribeConversation(args: unknown): Promise<string> {
+  const input = SubscribeConversationInput.parse(args);
+  const client = getChatClient();
+
+  const success = client.subscribe(input.conversationId);
+
+  if (success) {
+    return `Subscribed to conversation ${input.conversationId}.\n\nYou will now receive real-time messages. Use cliver_get_new_messages to retrieve them.`;
+  } else {
+    return `Failed to subscribe. Chat client is not connected. Please ensure you are authenticated.`;
+  }
+}
+
+async function handleGetChatStatus(args: unknown): Promise<string> {
+  GetChatStatusInput.parse(args);
+  const client = getChatClient();
+  const status = client.getStatus();
+
+  return `Chat Connection Status:
+
+Connected: ${status.connected ? 'Yes' : 'No'}
+Reconnecting: ${status.reconnecting ? 'Yes' : 'No'}
+Subscribed Conversations: ${status.subscribedConversations.length > 0 ? status.subscribedConversations.join(', ') : 'None'}
+Buffered Messages: ${status.bufferedMessages}
+
+${status.connected ? 'Real-time messaging is active.' : 'Use cliver_subscribe_conversation to connect to a conversation.'}`;
+}
+
+// ===========================================
+// ONBOARDING & BALANCE HANDLERS
+// ===========================================
+
+async function handleOnboard(args: unknown): Promise<string> {
+  const input = args as {
+    name?: string;
+    skills?: string[];
+    bio?: string;
+    createService?: {
+      title: string;
+      description: string;
+      price: number;
+      category: string;
+    };
+  };
+
+  const steps: string[] = [];
+  const authMethod = getAuthMethod();
+
+  // Step 1: Check authentication
+  if (authMethod === 'none') {
+    return `Not authenticated yet.
+
+To get started, you need to authenticate with your wallet:
+
+1. Call cliver_get_challenge with your wallet address
+2. Sign the challenge message
+3. Call cliver_auth with your wallet address and signature
+
+Or set CLIVER_API_KEY in your MCP environment config.`;
+  }
+  steps.push('Authenticated');
+
+  // Step 2: Check if already registered as agent
+  let agentInfo: { id: string; name: string; skills: string[]; trustScore: number } | null = null;
+  try {
+    agentInfo = await apiRequest('/agents/me', { requireAuth: true }) as typeof agentInfo;
+    steps.push(`Already registered as agent: ${agentInfo!.name}`);
+  } catch {
+    // Not registered yet — register now
+    if (!input.name) {
+      return `You're authenticated but not registered as an agent yet.
+
+Call cliver_onboard again with a "name" parameter to register:
+  cliver_onboard({ name: "YourAgentName", skills: ["skill1", "skill2"], bio: "What I do" })`;
+    }
+
+    const registerResult = await apiRequest('/auth/register-agent', {
+      method: 'POST',
+      body: {
+        name: input.name,
+        skills: input.skills || [],
+        bio: input.bio,
+      },
+      requireAuth: true,
+    }) as { token: string; agent: { id: string; name: string; skills: string[]; trustScore: number }; starterCredits?: number };
+
+    authToken = registerResult.token;
+    agentInfo = registerResult.agent;
+
+    const creditsMsg = registerResult.starterCredits
+      ? ` You received $${registerResult.starterCredits} in free Gateway API credits.`
+      : '';
+    steps.push(`Registered as agent: ${agentInfo!.name}${creditsMsg}`);
+  }
+
+  // Step 3: Optionally create a service
+  if (input.createService) {
+    const { title, description, price, category } = input.createService;
+    if (title && description && price && category) {
+      const service = await apiRequest('/agents/me/services', {
+        method: 'POST',
+        body: { title, description, price, category },
+        requireAuth: true,
+      }) as { id: string; title: string; price: number };
+      steps.push(`Created service: "${service.title}" ($${service.price} USDC) — ID: ${service.id}`);
+    }
+  }
+
+  // Step 4: Check wallet balance
+  let balanceInfo = '';
+  try {
+    const balance = await apiRequest('/wallet/balance', { requireAuth: true }) as {
+      balance: number;
+      availableBalance: number;
+    };
+    balanceInfo = `\nWallet balance: $${balance.balance.toFixed(2)} ($${balance.availableBalance.toFixed(2)} available)`;
+  } catch {
+    balanceInfo = '\nWallet: not yet created (will be created on first use)';
+  }
+
+  // Step 5: Get existing services
+  let servicesInfo = '';
+  try {
+    const myServices = await apiRequest(`/services?agentId=${agentInfo!.id}`) as Array<{
+      id: string;
+      title: string;
+      price: number;
+    }>;
+    if (myServices.length > 0) {
+      servicesInfo = '\n\nYour services:\n' + myServices.map(s => `  - ${s.title} ($${s.price}) — ID: ${s.id}`).join('\n');
+    } else {
+      servicesInfo = '\n\nNo services yet. Create one with cliver_create_service.';
+    }
+  } catch {
+    servicesInfo = '';
+  }
+
+  return `Onboarding complete!
+
+Steps completed:
+${steps.map((s, i) => `  ${i + 1}. ${s}`).join('\n')}
+
+Agent: ${agentInfo!.name} (ID: ${agentInfo!.id})
+Skills: ${agentInfo!.skills?.join(', ') || 'None set'}
+Trust: ${agentInfo!.trustScore}${balanceInfo}${servicesInfo}
+
+Next steps:
+  - Create a service: cliver_create_service({ title, description, price, category })
+  - Check for gigs: cliver_get_my_gigs()
+  - Check balance: cliver_check_balance()`;
+}
+
+async function handleCheckBalance(_args: unknown): Promise<string> {
+  const authMethod = getAuthMethod();
+  if (authMethod === 'none') {
+    return 'Not authenticated. Use cliver_auth or set CLIVER_API_KEY first.';
+  }
+
+  let walletInfo = '';
+  try {
+    const balance = await apiRequest('/wallet/balance', { requireAuth: true }) as {
+      balance: number;
+      pendingCharges: number;
+      availableBalance: number;
+      lifetimeEarnings: number;
+      lifetimeSpending: number;
+      currency: string;
+    };
+    walletInfo = `Gateway Wallet:
+  Balance: $${balance.balance.toFixed(2)} ${balance.currency}
+  Pending charges: $${balance.pendingCharges.toFixed(2)}
+  Available: $${balance.availableBalance.toFixed(2)}
+  Lifetime earnings: $${balance.lifetimeEarnings.toFixed(2)}
+  Lifetime spending: $${balance.lifetimeSpending.toFixed(2)}`;
+  } catch {
+    walletInfo = 'Gateway Wallet: Not created yet (will be created on first use)';
+  }
+
+  let creditsInfo = '';
+  try {
+    const credits = await apiRequest('/payments/balance', { requireAuth: true }) as {
+      balance: number;
+      currency: string;
+    };
+    creditsInfo = `\n\nPlatform Credits:
+  Balance: ${credits.balance.toFixed(2)} ${credits.currency}
+  (Purchased via Stripe, can be transferred to Gateway wallet)`;
+  } catch {
+    creditsInfo = '\n\nPlatform Credits: None';
+  }
+
+  return `${walletInfo}${creditsInfo}
+
+Tips:
+  - Gateway wallet is used for Cliver's hosted API services (image gen, TTS, etc.)
+  - You don't need wallet balance if you use your own API keys
+  - Transfer credits: POST /wallet/fund-from-credits { amount: N }`;
+}
+
 /**
  * Main MCP Server
  */
@@ -925,6 +1399,9 @@ async function main() {
         case 'cliver_send_message':
           result = await handleSendMessage(args);
           break;
+        case 'cliver_upload_chat_file':
+          result = await handleUploadChatFile(args);
+          break;
         case 'cliver_get_gig':
           result = await handleGetGig(args);
           break;
@@ -979,6 +1456,26 @@ async function main() {
         case 'cliver_delete_faq':
           result = await handleDeleteFaq(args);
           break;
+
+        // Real-time chat
+        case 'cliver_get_new_messages':
+          result = await handleGetNewMessages(args);
+          break;
+        case 'cliver_subscribe_conversation':
+          result = await handleSubscribeConversation(args);
+          break;
+        case 'cliver_get_chat_status':
+          result = await handleGetChatStatus(args);
+          break;
+
+        // Onboarding & balance
+        case 'cliver_onboard':
+          result = await handleOnboard(args);
+          break;
+        case 'cliver_check_balance':
+          result = await handleCheckBalance(args);
+          break;
+
         default:
           throw new Error(`Unknown tool: ${name}`);
       }

@@ -230,7 +230,7 @@ export const toolSchemas = {
 
   cliver_send_message: {
     name: 'cliver_send_message',
-    description: 'Send a message in a gig conversation. Requires authentication.',
+    description: 'Send a text message in a gig conversation. Requires authentication. For sending images/files, use cliver_upload_chat_file instead.',
     inputSchema: {
       type: 'object' as const,
       properties: {
@@ -244,6 +244,77 @@ export const toolSchemas = {
         },
       },
       required: ['conversationId', 'content'],
+    },
+  },
+
+  cliver_upload_chat_file: {
+    name: 'cliver_upload_chat_file',
+    description: 'Upload a file (image, document, etc.) to a conversation and send it as a message. The file will be stored in R2 and a viewable URL will be shared in the chat. Use this when you need to share generated images or files with the buyer. Requires authentication.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        conversationId: {
+          type: 'string',
+          description: 'The conversation ID to send the file to',
+        },
+        filePath: {
+          type: 'string',
+          description: 'Local path to the file to upload',
+        },
+        caption: {
+          type: 'string',
+          description: 'Optional caption/message to send with the file',
+        },
+      },
+      required: ['conversationId', 'filePath'],
+    },
+  },
+
+  // ===========================================
+  // REAL-TIME CHAT TOOLS (WebSocket-based)
+  // ===========================================
+
+  cliver_get_new_messages: {
+    name: 'cliver_get_new_messages',
+    description: 'Get new messages that have arrived via WebSocket. Returns messages from the buffer and clears them. Use this to check for buyer responses in real-time without polling the API. The MCP server maintains a persistent WebSocket connection to receive messages instantly.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        conversationId: {
+          type: 'string',
+          description: 'Optional: Filter messages by conversation ID. If not provided, returns all new messages.',
+        },
+        limit: {
+          type: 'number',
+          description: 'Maximum number of messages to return (default: 50)',
+        },
+      },
+      required: [],
+    },
+  },
+
+  cliver_subscribe_conversation: {
+    name: 'cliver_subscribe_conversation',
+    description: 'Subscribe to a conversation to receive real-time messages via WebSocket. Call this when you start working on a gig to get instant notifications of buyer messages. Messages will be buffered and available via cliver_get_new_messages.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        conversationId: {
+          type: 'string',
+          description: 'The conversation ID to subscribe to',
+        },
+      },
+      required: ['conversationId'],
+    },
+  },
+
+  cliver_get_chat_status: {
+    name: 'cliver_get_chat_status',
+    description: 'Check the status of the WebSocket connection to the chat server. Shows connection state, subscribed conversations, and buffered message count.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {},
+      required: [],
     },
   },
 
@@ -677,6 +748,54 @@ export const toolSchemas = {
       required: ['serviceId', 'faqId'],
     },
   },
+
+  // ===========================================
+  // ONBOARDING & BALANCE TOOLS
+  // ===========================================
+
+  cliver_onboard: {
+    name: 'cliver_onboard',
+    description: 'All-in-one onboarding wizard. Checks if you are authenticated and registered, registers you if not, optionally creates a service, and returns your status and shareable profile link. This is the easiest way to get started on Cliver.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        name: {
+          type: 'string',
+          description: 'Your agent name (required if not already registered)',
+        },
+        skills: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Your skills list (e.g., ["code review", "bug fixing"])',
+        },
+        bio: {
+          type: 'string',
+          description: 'Brief description of your capabilities',
+        },
+        createService: {
+          type: 'object',
+          properties: {
+            title: { type: 'string', description: 'Service title' },
+            description: { type: 'string', description: 'What the service does' },
+            price: { type: 'number', description: 'Price in USDC' },
+            category: { type: 'string', description: 'Category (e.g., "code", "video", "writing")' },
+          },
+          description: 'Optionally create your first service in the same call',
+        },
+      },
+      required: [],
+    },
+  },
+
+  cliver_check_balance: {
+    name: 'cliver_check_balance',
+    description: 'Check your wallet balance (Gateway API credits) and platform credit balance. Shows available funds, pending charges, and lifetime earnings/spending.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {},
+      required: [],
+    },
+  },
 };
 
 // Zod schemas for validation
@@ -739,6 +858,24 @@ export const SendMessageInput = z.object({
   conversationId: z.string().min(1, 'Conversation ID is required'),
   content: z.string().min(1, 'Message content is required'),
 });
+
+export const UploadChatFileInput = z.object({
+  conversationId: z.string().min(1, 'Conversation ID is required'),
+  filePath: z.string().min(1, 'File path is required'),
+  caption: z.string().optional(),
+});
+
+// Real-time chat schemas
+export const GetNewMessagesInput = z.object({
+  conversationId: z.string().optional(),
+  limit: z.number().positive().optional(),
+});
+
+export const SubscribeConversationInput = z.object({
+  conversationId: z.string().min(1, 'Conversation ID is required'),
+});
+
+export const GetChatStatusInput = z.object({});
 
 export const GetGigInput = z.object({
   gigId: z.string().min(1, 'Gig ID is required'),
